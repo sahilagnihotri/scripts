@@ -57,12 +57,12 @@
             },
             {
                 "commandline": "cmd.exe /k C:\\tools\\cmder\\vendor\\init.bat",
-                "font": 
-                {
-                    "size": 12
-                },
                 "guid": "{c6eaf9f4-32a7-5fdc-b5cf-066e8a4b1e55}",
                 "name": "cmder",
+                "background": "#2e3436",
+                "fontSize": 12,
+                "fontFace": "Cascadia Code",
+                "padding": "15",
                 "startingDirectory": "C:\\git-myvr"
             },
             {
@@ -74,7 +74,16 @@
             {
                 "guid": "{5a069d55-87bd-57cf-8a07-2726b203d3e5}",
                 "name": "Ubuntu 20.04.4 LTS",
-                "source": "CanonicalGroupLimited.Ubuntu20.04LTS_79rhkp1fndgsc"
+                "source": "CanonicalGroupLimited.Ubuntu20.04LTS_79rhkp1fndgsc",
+                "startingDirectory": "/home/sahil"
+            },
+            {
+                "guid": "{2c4de342-38b7-51cf-b940-2309a097f518}",
+                "hidden": false,
+                "name": "Ubuntu",
+                "source": "Windows.Terminal.Wsl",
+                "commandline" : "wsl.exe ~",
+                "colorScheme": "Tango Dark"
             }
         ]
     },
