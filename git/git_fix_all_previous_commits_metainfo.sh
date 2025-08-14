@@ -47,7 +47,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Git Commit Metadata Fix Script${NC}"
-echo "This script will change the email address and optionally the name for all previous commits."
+echo "This script will change the email address and/or name for all previous commits."
 echo -e "${RED}WARNING: This rewrites Git history and changes commit hashes!${NC}"
 echo
 
@@ -149,44 +149,100 @@ fi
 
 echo
 
-# Get current email if not provided
-if [ -z "$OLD_EMAIL" ]; then
-    echo "Enter the OLD email address to replace:"
-    read -r OLD_EMAIL
-fi
-
-if [ -z "$NEW_EMAIL" ]; then
-    echo "Enter the NEW email address:"
-    read -r NEW_EMAIL
-fi
-
-# Get current name if not provided (optional)
-if [ -z "$OLD_NAME" ] && [ -z "$NEW_NAME" ]; then
-    echo
-    echo "Do you also want to change the author/committer name? (y/N)"
-    read -r CHANGE_NAME
-    if [[ "$CHANGE_NAME" =~ ^[Yy]$ ]]; then
-        echo "Enter the OLD name to replace (leave empty to skip):"
-        read -r OLD_NAME
-        if [ -n "$OLD_NAME" ]; then
+# Determine what to change if not provided via environment variables
+if [ -z "$OLD_EMAIL" ] && [ -z "$NEW_EMAIL" ] && [ -z "$OLD_NAME" ] && [ -z "$NEW_NAME" ]; then
+    echo "What would you like to change?"
+    echo "1) Email address only"
+    echo "2) Name only"
+    echo "3) Both email and name"
+    echo "Enter your choice (1/2/3):"
+    read -r CHANGE_CHOICE
+    
+    case "$CHANGE_CHOICE" in
+        1)
+            echo "Enter the OLD email address to replace:"
+            read -r OLD_EMAIL
+            echo "Enter the NEW email address:"
+            read -r NEW_EMAIL
+            ;;
+        2)
+            echo "Enter the OLD name to replace:"
+            read -r OLD_NAME
             echo "Enter the NEW name:"
             read -r NEW_NAME
+            ;;
+        3)
+            echo "Enter the OLD email address to replace:"
+            read -r OLD_EMAIL
+            echo "Enter the NEW email address:"
+            read -r NEW_EMAIL
+            echo "Enter the OLD name to replace:"
+            read -r OLD_NAME
+            echo "Enter the NEW name:"
+            read -r NEW_NAME
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Exiting.${NC}"
+            exit 1
+            ;;
+    esac
+else
+    # Legacy behavior: get email if not provided
+    if [ -z "$OLD_EMAIL" ] && [ -z "$OLD_NAME" ]; then
+        echo "Enter the OLD email address to replace:"
+        read -r OLD_EMAIL
+    fi
+    
+    if [ -z "$NEW_EMAIL" ] && [ -n "$OLD_EMAIL" ]; then
+        echo "Enter the NEW email address:"
+        read -r NEW_EMAIL
+    fi
+    
+    # Get current name if not provided (optional)
+    if [ -z "$OLD_NAME" ] && [ -z "$NEW_NAME" ] && [ -n "$OLD_EMAIL" ]; then
+        echo
+        echo "Do you also want to change the author/committer name? (y/N)"
+        read -r CHANGE_NAME
+        if [[ "$CHANGE_NAME" =~ ^[Yy]$ ]]; then
+            echo "Enter the OLD name to replace (leave empty to skip):"
+            read -r OLD_NAME
+            if [ -n "$OLD_NAME" ]; then
+                echo "Enter the NEW name:"
+                read -r NEW_NAME
+            fi
         fi
     fi
 fi
 
-# Validate email addresses
-if [[ ! "$OLD_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+# Validate email addresses (if provided)
+if [ -n "$OLD_EMAIL" ] && [[ ! "$OLD_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
     echo -e "${RED}Error: Invalid old email format${NC}"
     exit 1
 fi
 
-if [[ ! "$NEW_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+if [ -n "$NEW_EMAIL" ] && [[ ! "$NEW_EMAIL" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
     echo -e "${RED}Error: Invalid new email format${NC}"
     exit 1
 fi
 
-# Validate name parameters (if provided)
+# Validate that we have something to change
+if [ -z "$OLD_EMAIL" ] && [ -z "$OLD_NAME" ]; then
+    echo -e "${RED}Error: Must specify either OLD_EMAIL or OLD_NAME to change${NC}"
+    exit 1
+fi
+
+# Validate email pairing
+if [ -n "$OLD_EMAIL" ] && [ -z "$NEW_EMAIL" ]; then
+    echo -e "${RED}Error: NEW_EMAIL must be provided when OLD_EMAIL is specified${NC}"
+    exit 1
+fi
+
+if [ -z "$OLD_EMAIL" ] && [ -n "$NEW_EMAIL" ]; then
+    echo -e "${RED}Error: OLD_EMAIL must be provided when NEW_EMAIL is specified${NC}"
+    exit 1
+fi
+
+# Validate name pairing
 if [ -n "$OLD_NAME" ] && [ -z "$NEW_NAME" ]; then
     echo -e "${RED}Error: NEW_NAME must be provided when OLD_NAME is specified${NC}"
     exit 1
@@ -198,28 +254,45 @@ if [ -z "$OLD_NAME" ] && [ -n "$NEW_NAME" ]; then
 fi
 
 echo
-echo "OLD EMAIL: $OLD_EMAIL"
-echo "NEW EMAIL: $NEW_EMAIL"
+if [ -n "$OLD_EMAIL" ] && [ -n "$NEW_EMAIL" ]; then
+    echo "OLD EMAIL: $OLD_EMAIL"
+    echo "NEW EMAIL: $NEW_EMAIL"
+fi
 if [ -n "$OLD_NAME" ] && [ -n "$NEW_NAME" ]; then
     echo "OLD NAME:  $OLD_NAME"
     echo "NEW NAME:  $NEW_NAME"
 fi
 echo
 
-# Check if there are any commits with the old email
-COMMIT_COUNT=$(git log --all --pretty=format:"%ae" | grep -c "^$OLD_EMAIL$" || true)
-
-if [ "$COMMIT_COUNT" -eq 0 ]; then
-    echo -e "${YELLOW}No commits found with email: $OLD_EMAIL${NC}"
-    exit 0
+# Check if there are any commits with the old email (if email is being changed)
+if [ -n "$OLD_EMAIL" ]; then
+    COMMIT_COUNT=$(git log --all --pretty=format:"%ae" | grep -c "^$OLD_EMAIL$" || true)
+    if [ "$COMMIT_COUNT" -eq 0 ]; then
+        echo -e "${YELLOW}No commits found with email: $OLD_EMAIL${NC}"
+        # Don't exit yet, check if we're also changing names
+    else
+        echo "Found $COMMIT_COUNT commits with the old email address."
+    fi
+else
+    COMMIT_COUNT=0
 fi
-
-echo "Found $COMMIT_COUNT commits with the old email address."
 
 # Check if there are any commits with the old name (if specified)
 if [ -n "$OLD_NAME" ]; then
     NAME_COMMIT_COUNT=$(git log --all --pretty=format:"%an" | grep -c "^$OLD_NAME$" || true)
-    echo "Found $NAME_COMMIT_COUNT commits with the old name."
+    if [ "$NAME_COMMIT_COUNT" -eq 0 ]; then
+        echo -e "${YELLOW}No commits found with name: $OLD_NAME${NC}"
+    else
+        echo "Found $NAME_COMMIT_COUNT commits with the old name."
+    fi
+else
+    NAME_COMMIT_COUNT=0
+fi
+
+# Exit if no commits found for either email or name
+if [ "$COMMIT_COUNT" -eq 0 ] && [ "$NAME_COMMIT_COUNT" -eq 0 ]; then
+    echo -e "${YELLOW}No commits found to modify. Exiting.${NC}"
+    exit 0
 fi
 echo
 
@@ -257,26 +330,36 @@ fi
 if command -v git-filter-repo > /dev/null 2>&1; then
     echo "Using git filter-repo (recommended method)..."
     
-    # Build the callback script
-    CALLBACK="return email.replace(b'$OLD_EMAIL', b'$NEW_EMAIL')"
+    # Build the filter-repo command based on what we're changing
+    FILTER_REPO_ARGS="--force"
+    
+    if [ -n "$OLD_EMAIL" ] && [ -n "$NEW_EMAIL" ]; then
+        EMAIL_CALLBACK="return email.replace(b'$OLD_EMAIL', b'$NEW_EMAIL')"
+        FILTER_REPO_ARGS="$FILTER_REPO_ARGS --email-callback '$EMAIL_CALLBACK'"
+    fi
     
     if [ -n "$OLD_NAME" ] && [ -n "$NEW_NAME" ]; then
-        git filter-repo --email-callback "$CALLBACK" --name-callback "return name.replace(b'$OLD_NAME', b'$NEW_NAME')" --force
-    else
-        git filter-repo --email-callback "$CALLBACK" --force
+        NAME_CALLBACK="return name.replace(b'$OLD_NAME', b'$NEW_NAME')"
+        FILTER_REPO_ARGS="$FILTER_REPO_ARGS --name-callback '$NAME_CALLBACK'"
     fi
+    
+    eval "git filter-repo $FILTER_REPO_ARGS"
     
     echo "git filter-repo automatically updated tags to point to new commits."
 else
     echo "Using git filter-branch (git filter-repo not found)..."
     
-    ENV_FILTER="
+    ENV_FILTER=""
+    
+    if [ -n "$OLD_EMAIL" ] && [ -n "$NEW_EMAIL" ]; then
+        ENV_FILTER="$ENV_FILTER
 if [ \"\$GIT_COMMITTER_EMAIL\" = \"$OLD_EMAIL\" ]; then
     export GIT_COMMITTER_EMAIL=\"$NEW_EMAIL\"
 fi
 if [ \"\$GIT_AUTHOR_EMAIL\" = \"$OLD_EMAIL\" ]; then
     export GIT_AUTHOR_EMAIL=\"$NEW_EMAIL\"
 fi"
+    fi
     
     if [ -n "$OLD_NAME" ] && [ -n "$NEW_NAME" ]; then
         ENV_FILTER="$ENV_FILTER
@@ -321,7 +404,7 @@ if [ "$SAVED_REMOTES_COUNT" -gt 0 ]; then
                 git remote add "$remote_name" "$clean_url" 2>/dev/null || git remote set-url "$remote_name" "$clean_url"
             fi
         fi
-    done < <(cat "$TEMP_REMOTE_FILE" | awk '{print $1 "\t" $2}' | sort -u)
+    done <<< "$(cat "$TEMP_REMOTE_FILE" | awk '{print $1 "\t" $2}' | sort -u)"
     echo "✅ Remotes restored."
 else
     echo -e "${YELLOW}No remotes were configured before. Would you like to add one now? (y/N)${NC}"
