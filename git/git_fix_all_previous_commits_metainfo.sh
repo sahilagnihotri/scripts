@@ -339,7 +339,10 @@ if command -v git-filter-repo > /dev/null 2>&1; then
     fi
     
     if [ -n "$OLD_NAME" ] && [ -n "$NEW_NAME" ]; then
-        NAME_CALLBACK="return name.replace(b'$OLD_NAME', b'$NEW_NAME')"
+        # Escape the names for Python bytes literals
+        OLD_NAME_ESCAPED=$(printf '%s' "$OLD_NAME" | sed "s/'/\\\\'/g")
+        NEW_NAME_ESCAPED=$(printf '%s' "$NEW_NAME" | sed "s/'/\\\\'/g")
+        NAME_CALLBACK="return name.replace(b'$OLD_NAME_ESCAPED', b'$NEW_NAME_ESCAPED')"
         FILTER_REPO_ARGS="$FILTER_REPO_ARGS --name-callback '$NAME_CALLBACK'"
     fi
     
