@@ -78,6 +78,77 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
     exit 1
 fi
 
+echo -e "${YELLOW}=== REPOSITORY STATUS CHECK ===${NC}"
+
+# Check for uncommitted changes
+if ! git diff-index --quiet HEAD --; then
+    echo -e "${RED}Warning: You have uncommitted changes in your working directory!${NC}"
+    echo "Uncommitted files:"
+    git status --porcelain
+    echo
+    echo "It's recommended to commit or stash these changes before rewriting history."
+    echo -e "${BLUE}Do you want to continue anyway? (y/N)${NC}"
+    read -r CONTINUE_WITH_CHANGES
+    if [[ ! "$CONTINUE_WITH_CHANGES" =~ ^[Yy]$ ]]; then
+        echo "Operation cancelled. Please commit or stash your changes first."
+        exit 0
+    fi
+    echo
+fi
+
+# Check if repository has commits
+if ! git rev-parse HEAD > /dev/null 2>&1; then
+    echo -e "${YELLOW}No commits found in this repository.${NC}"
+    echo "Nothing to rewrite. Exiting."
+    exit 0
+fi
+
+# Check remote status
+REMOTES=$(git remote)
+if [ -n "$REMOTES" ]; then
+    echo "Checking remote status..."
+    
+    # Check if we have unpushed commits (if remote exists)
+    if git remote get-url origin > /dev/null 2>&1; then
+        REMOTE_NAME="origin"
+    else
+        REMOTE_NAME=$(echo "$REMOTES" | head -1)
+    fi
+    
+    # Try to fetch to get latest remote state (suppress errors if no network)
+    if git fetch "$REMOTE_NAME" > /dev/null 2>&1; then
+        # Check if local is ahead of remote
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        if git rev-list --count "$REMOTE_NAME/$CURRENT_BRANCH..$CURRENT_BRANCH" > /dev/null 2>&1; then
+            AHEAD_COUNT=$(git rev-list --count "$REMOTE_NAME/$CURRENT_BRANCH..$CURRENT_BRANCH")
+            if [ "$AHEAD_COUNT" -gt 0 ]; then
+                echo -e "${YELLOW}Your local branch is $AHEAD_COUNT commits ahead of remote.${NC}"
+                echo "These unpushed commits will have their metadata changed."
+            fi
+        fi
+    else
+        echo -e "${YELLOW}Could not fetch from remote (network issue or no tracking branch).${NC}"
+    fi
+else
+    echo -e "${YELLOW}No remotes configured.${NC}"
+fi
+
+# Check for tags
+TAGS=$(git tag -l)
+if [ -n "$TAGS" ]; then
+    TAG_COUNT=$(echo "$TAGS" | wc -l | tr -d ' ')
+    echo -e "${YELLOW}Found $TAG_COUNT tags in repository:${NC}"
+    git tag -l --format="  %(refname:short) -> %(objectname:short)"
+    echo
+    echo -e "${RED}WARNING: Tags will be recreated to point to new commit SHAs after rewrite!${NC}"
+    echo "Tag names will remain the same, but they'll point to the new commits."
+    echo
+else
+    echo "No tags found in repository."
+fi
+
+echo
+
 # Get current email if not provided
 if [ -z "$OLD_EMAIL" ]; then
     echo "Enter the OLD email address to replace:"
@@ -164,6 +235,11 @@ fi
 echo
 echo -e "${YELLOW}Starting email/name replacement...${NC}"
 
+# Save tag information before rewrite
+echo "Saving tag information..."
+TEMP_TAG_FILE=$(mktemp)
+git tag -l --format="%(refname:short) %(objectname)" > "$TEMP_TAG_FILE" 2>/dev/null || true
+
 # Check if git filter-repo is available
 if command -v git-filter-repo > /dev/null 2>&1; then
     echo "Using git filter-repo (recommended method)..."
@@ -176,6 +252,8 @@ if command -v git-filter-repo > /dev/null 2>&1; then
     else
         git filter-repo --email-callback "$CALLBACK" --force
     fi
+    
+    echo "git filter-repo automatically updated tags to point to new commits."
 else
     echo "Using git filter-branch (git filter-repo not found)..."
     
@@ -201,14 +279,152 @@ fi"
 
     # Clean up refs
     git for-each-ref --format="%(refname)" refs/original/ | xargs -n 1 git update-ref -d
+    
+    echo "git filter-branch updated tags to point to new commits."
+fi
+
+# Verify tags after rewrite
+echo
+echo -e "${YELLOW}Verifying tags after rewrite...${NC}"
+UPDATED_TAGS=$(git tag -l)
+if [ -n "$UPDATED_TAGS" ]; then
+    TAG_COUNT=$(echo "$UPDATED_TAGS" | wc -l | tr -d ' ')
+    echo "✅ $TAG_COUNT tags successfully updated:"
+    git tag -l --format="  %(refname:short) -> %(objectname:short)"
+    echo
+else
+    echo "No tags to update."
+fi
+
+# Clean up temporary file
+if [ -f "$TEMP_TAG_FILE" ]; then
+    rm -f "$TEMP_TAG_FILE"
 fi
 
 echo
 echo -e "${GREEN}Email/name replacement completed!${NC}"
 echo
+
+# Check repository state after changes
+echo -e "${YELLOW}=== POST-CHANGE REPOSITORY STATUS ===${NC}"
+
+# All commits are now "unpushed" since we rewrote history
+TOTAL_COMMITS=$(git rev-list --count HEAD)
+echo -e "${RED}IMPORTANT: All $TOTAL_COMMITS commits now have different hashes and need to be force-pushed!${NC}"
+
+# Check if we have remotes
+REMOTES=$(git remote)
+if [ -n "$REMOTES" ]; then
+    echo -e "${YELLOW}Remotes found - changes need to be pushed to update the server.${NC}"
+    if git remote get-url origin > /dev/null 2>&1; then
+        REMOTE_NAME="origin"
+    else
+        REMOTE_NAME=$(echo "$REMOTES" | head -1)
+    fi
+    echo "Primary remote: $REMOTE_NAME ($(git remote get-url "$REMOTE_NAME" 2>/dev/null || echo "URL not available"))"
+else
+    echo -e "${YELLOW}No remotes configured - add one to push changes to a server.${NC}"
+fi
+
+echo
 echo "Next steps:"
 echo "1. Verify the changes: git log --oneline --pretty=format:'%h %an <%ae> %s'"
-echo "2. If you've already pushed to remote, force push: git push --force-with-lease"
+echo "2. Push changes to remote: git push --force-with-lease"
 echo "3. Notify collaborators to re-clone or rebase their work"
 echo
-echo -e "${YELLOW}Note: All commit hashes have changed!${NC}"
+echo -e "${YELLOW}Note: All commit hashes have changed due to metadata rewriting!${NC}"
+echo
+
+# Ask if user wants to push now
+echo -e "${BLUE}Do you want to push the changes to remote now? (y/N)${NC}"
+read -r PUSH_NOW
+
+if [[ "$PUSH_NOW" =~ ^[Yy]$ ]]; then
+    echo
+    echo -e "${YELLOW}Checking for configured remotes...${NC}"
+    
+    # Get all remotes
+    REMOTES=$(git remote)
+    
+    if [ -z "$REMOTES" ]; then
+        echo -e "${YELLOW}No remotes configured in this repository.${NC}"
+        echo
+        echo "To push changes, you need to add a remote first:"
+        echo "  git remote add origin <your-repository-url>"
+        echo "Then push with:"
+        echo "  git push --force-with-lease origin"
+        echo "  git push --force-with-lease origin --tags  # Push tags too"
+    else
+        echo "Available remotes:"
+        git remote -v
+        echo
+        
+        # Check if origin exists
+        if git remote get-url origin > /dev/null 2>&1; then
+            REMOTE_NAME="origin"
+        else
+            # Use the first available remote
+            REMOTE_NAME=$(echo "$REMOTES" | head -1)
+        fi
+        
+        echo "Using remote: $REMOTE_NAME"
+        echo "Executing: git push --force-with-lease $REMOTE_NAME"
+        
+        if git push --force-with-lease "$REMOTE_NAME"; then
+            echo -e "${GREEN}Successfully pushed commits to remote '$REMOTE_NAME'!${NC}"
+            
+            # Push tags if they exist
+            TAGS_TO_PUSH=$(git tag -l)
+            if [ -n "$TAGS_TO_PUSH" ]; then
+                echo "Pushing updated tags..."
+                if git push --force-with-lease "$REMOTE_NAME" --tags; then
+                    echo -e "${GREEN}Successfully pushed tags to remote '$REMOTE_NAME'!${NC}"
+                else
+                    echo -e "${YELLOW}Warning: Failed to push tags. You may need to push them manually:${NC}"
+                    echo "git push --force-with-lease $REMOTE_NAME --tags"
+                fi
+            fi
+        else
+            echo -e "${RED}Failed to push changes.${NC}"
+            echo
+            echo "You may need to:"
+            echo "1. Set up authentication (SSH keys, personal access tokens)"
+            echo "2. Check if the remote URL is correct: git remote -v"
+            echo "3. Try pushing manually: git push --force-with-lease $REMOTE_NAME"
+            echo "4. Push tags separately: git push --force-with-lease $REMOTE_NAME --tags"
+        fi
+    fi
+else
+    echo
+    echo -e "${YELLOW}Remember to push your changes when ready.${NC}"
+    echo
+    # Show available remotes for manual push
+    REMOTES=$(git remote)
+    if [ -n "$REMOTES" ]; then
+        echo "Available remotes:"
+        git remote -v
+        echo
+        if git remote get-url origin > /dev/null 2>&1; then
+            echo -e "${BLUE}git push --force-with-lease origin${NC}"
+            TAGS_TO_PUSH=$(git tag -l)
+            if [ -n "$TAGS_TO_PUSH" ]; then
+                echo -e "${BLUE}git push --force-with-lease origin --tags${NC}"
+            fi
+        else
+            FIRST_REMOTE=$(echo "$REMOTES" | head -1)
+            echo -e "${BLUE}git push --force-with-lease $FIRST_REMOTE${NC}"
+            TAGS_TO_PUSH=$(git tag -l)
+            if [ -n "$TAGS_TO_PUSH" ]; then
+                echo -e "${BLUE}git push --force-with-lease $FIRST_REMOTE --tags${NC}"
+            fi
+        fi
+    else
+        echo "No remotes configured. Add one first:"
+        echo -e "${BLUE}git remote add origin <your-repository-url>${NC}"
+        echo -e "${BLUE}git push --force-with-lease origin${NC}"
+        TAGS_TO_PUSH=$(git tag -l)
+        if [ -n "$TAGS_TO_PUSH" ]; then
+            echo -e "${BLUE}git push --force-with-lease origin --tags${NC}"
+        fi
+    fi
+fi
