@@ -240,6 +240,19 @@ echo "Saving tag information..."
 TEMP_TAG_FILE=$(mktemp)
 git tag -l --format="%(refname:short) %(objectname)" > "$TEMP_TAG_FILE" 2>/dev/null || true
 
+# Save remote configuration before rewrite
+echo "Saving remote configuration..."
+TEMP_REMOTE_FILE=$(mktemp)
+git remote -v > "$TEMP_REMOTE_FILE" 2>/dev/null || true
+SAVED_REMOTES_COUNT=$(wc -l < "$TEMP_REMOTE_FILE" | tr -d ' ')
+
+# Save current branch and upstream info
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+UPSTREAM_BRANCH=""
+if git rev-parse --abbrev-ref --symbolic-full-name @{u} > /dev/null 2>&1; then
+    UPSTREAM_BRANCH=$(git rev-parse --abbrev-ref --symbolic-full-name @{u})
+fi
+
 # Check if git filter-repo is available
 if command -v git-filter-repo > /dev/null 2>&1; then
     echo "Using git filter-repo (recommended method)..."
@@ -296,9 +309,46 @@ else
     echo "No tags to update."
 fi
 
-# Clean up temporary file
+# Restore remote configuration
+echo -e "${YELLOW}Restoring remote configuration...${NC}"
+if [ "$SAVED_REMOTES_COUNT" -gt 0 ]; then
+    echo "Restoring saved remotes..."
+    while IFS=$'\t' read -r remote_name remote_url; do
+        if [ -n "$remote_name" ] && [ -n "$remote_url" ]; then
+            # Remove (fetch) and (push) indicators
+            clean_url=$(echo "$remote_url" | sed 's/ (fetch)$//' | sed 's/ (push)$//')
+            if [ "$clean_url" != "$remote_url" ]; then
+                git remote add "$remote_name" "$clean_url" 2>/dev/null || git remote set-url "$remote_name" "$clean_url"
+            fi
+        fi
+    done < <(cat "$TEMP_REMOTE_FILE" | awk '{print $1 "\t" $2}' | sort -u)
+    echo "✅ Remotes restored."
+else
+    echo -e "${YELLOW}No remotes were configured before. Would you like to add one now? (y/N)${NC}"
+    read -r ADD_REMOTE
+    if [[ "$ADD_REMOTE" =~ ^[Yy]$ ]]; then
+        echo "Enter remote name (default: origin):"
+        read -r REMOTE_NAME
+        REMOTE_NAME="${REMOTE_NAME:-origin}"
+        
+        echo "Enter repository URL (e.g., https://github.com/username/repo.git):"
+        read -r REMOTE_URL
+        
+        if [ -n "$REMOTE_URL" ]; then
+            git remote add "$REMOTE_NAME" "$REMOTE_URL"
+            echo "✅ Added remote '$REMOTE_NAME': $REMOTE_URL"
+        else
+            echo "No URL provided, skipping remote setup."
+        fi
+    fi
+fi
+
+# Clean up temporary files
 if [ -f "$TEMP_TAG_FILE" ]; then
     rm -f "$TEMP_TAG_FILE"
+fi
+if [ -f "$TEMP_REMOTE_FILE" ]; then
+    rm -f "$TEMP_REMOTE_FILE"
 fi
 
 echo
@@ -368,9 +418,17 @@ if [[ "$PUSH_NOW" =~ ^[Yy]$ ]]; then
         fi
         
         echo "Using remote: $REMOTE_NAME"
-        echo "Executing: git push --force-with-lease $REMOTE_NAME"
         
-        if git push --force-with-lease "$REMOTE_NAME"; then
+        # Check if current branch has upstream
+        if git rev-parse --abbrev-ref --symbolic-full-name @{u} > /dev/null 2>&1; then
+            echo "Executing: git push --force-with-lease $REMOTE_NAME"
+            PUSH_CMD="git push --force-with-lease $REMOTE_NAME"
+        else
+            echo "Executing: git push --set-upstream $REMOTE_NAME $CURRENT_BRANCH"
+            PUSH_CMD="git push --set-upstream $REMOTE_NAME $CURRENT_BRANCH"
+        fi
+        
+        if eval "$PUSH_CMD"; then
             echo -e "${GREEN}Successfully pushed commits to remote '$REMOTE_NAME'!${NC}"
             
             # Push tags if they exist
@@ -405,26 +463,29 @@ else
         git remote -v
         echo
         if git remote get-url origin > /dev/null 2>&1; then
-            echo -e "${BLUE}git push --force-with-lease origin${NC}"
-            TAGS_TO_PUSH=$(git tag -l)
-            if [ -n "$TAGS_TO_PUSH" ]; then
-                echo -e "${BLUE}git push --force-with-lease origin --tags${NC}"
-            fi
+            MANUAL_REMOTE="origin"
         else
-            FIRST_REMOTE=$(echo "$REMOTES" | head -1)
-            echo -e "${BLUE}git push --force-with-lease $FIRST_REMOTE${NC}"
-            TAGS_TO_PUSH=$(git tag -l)
-            if [ -n "$TAGS_TO_PUSH" ]; then
-                echo -e "${BLUE}git push --force-with-lease $FIRST_REMOTE --tags${NC}"
-            fi
+            MANUAL_REMOTE=$(echo "$REMOTES" | head -1)
+        fi
+        
+        # Check if current branch has upstream for manual instructions
+        if git rev-parse --abbrev-ref --symbolic-full-name @{u} > /dev/null 2>&1; then
+            echo -e "${BLUE}git push --force-with-lease $MANUAL_REMOTE${NC}"
+        else
+            echo -e "${BLUE}git push --set-upstream $MANUAL_REMOTE $CURRENT_BRANCH${NC}"
+        fi
+        
+        TAGS_TO_PUSH=$(git tag -l)
+        if [ -n "$TAGS_TO_PUSH" ]; then
+            echo -e "${BLUE}git push --force-with-lease $MANUAL_REMOTE --tags${NC}"
         fi
     else
         echo "No remotes configured. Add one first:"
         echo -e "${BLUE}git remote add origin <your-repository-url>${NC}"
-        echo -e "${BLUE}git push --force-with-lease origin${NC}"
+        echo -e "${BLUE}git push --set-upstream origin $CURRENT_BRANCH${NC}"
         TAGS_TO_PUSH=$(git tag -l)
         if [ -n "$TAGS_TO_PUSH" ]; then
-            echo -e "${BLUE}git push --force-with-lease origin --tags${NC}"
+            echo -e "${BLUE}git push origin --tags${NC}"
         fi
     fi
 fi
